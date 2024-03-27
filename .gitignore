@@ -4,6 +4,7 @@ train/
 train_processed/
 train_small/
 train_small_processed/
+*.pt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
