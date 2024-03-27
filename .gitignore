@@ -1,3 +1,10 @@
+facenet_pytorch/
+runs/
+train/
+train_processed/
+train_small/
+train_small_processed/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
