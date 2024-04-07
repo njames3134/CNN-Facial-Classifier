@@ -21,11 +21,12 @@ from facenet_pytorch import (MTCNN, InceptionResnetV1,
 
 
 class ImageProcessing():
-    def __init__(self, dataset, dataset_dir) -> None:
+    def __init__(self, dataset, dataset_dir, img_size) -> None:
         super().__init__()
 
         self.dataset = dataset
         self.dataset_dir = dataset_dir
+        self.img_size = img_size
 
     def buildFolders(self):
         with open(f"{self.dataset_dir}.csv", 'r') as file:
@@ -75,34 +76,42 @@ class ImageProcessing():
 
                     # resizing
                     if (os.path.exists(output_path)):
-                        img = Image.open(output_path).resize((img_size, img_size))
+                        img = Image.open(output_path).resize((self.img_size, self.img_size))
                         img.save(output_path)
+                    else:
+                        img.resize((self.img_size, self.img_size))
+                        img.save(output_path)
+                        print(f"Failed to crop: {output_path}")
 
 class Model():
-    def __init__(self, model, optimizer, scheduler, trans, device) -> None:
+    def __init__(self, model, batch_size, img_size, optimizer, scheduler, trans, device) -> None:
         self.model = model
+        self.batch_size = batch_size
+        self.img_size = img_size
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.trans = trans
         self.device = device
     
     def train(self, crop_images):
-        if (crop_images):
-            ip = ImageProcessing("train", data_dir)
+        data_dir = f"{root_dir}/train"
+        if crop_images:
+            ip = ImageProcessing("train", data_dir, self.img_size)
             ip.buildFolders()
 
             mtcnn = MTCNN(
-                image_size=img_size,
+                image_size=self.img_size,
                 select_largest=False,
                 post_process=True,
                 margin=32,
                 min_face_size=20,
-                device=device
+                device=self.device
             )
 
             ip.cropImages(mtcnn)
             del mtcnn
 
+        # from https://github.com/timesler/facenet-pytorch/blob/master/examples/finetune.ipynb
         dataset = datasets.ImageFolder(data_dir + '_cropped', transform=self.trans)
         img_inds = np.arange(len(dataset))
         np.random.shuffle(img_inds)
@@ -111,12 +120,12 @@ class Model():
 
         train_loader = DataLoader(
             dataset,
-            batch_size=batch_size,
+            batch_size=self.batch_size,
             sampler=SubsetRandomSampler(train_inds)
         )
         val_loader = DataLoader(
             dataset,
-            batch_size=batch_size,
+            batch_size=self.batch_size,
             sampler=SubsetRandomSampler(val_inds)
         )
 
@@ -158,41 +167,30 @@ class Model():
             )
 
         writer.close()
-        # torch.save(resnet.state_dict(), os.path.join(root_dir, "state_dict.pt"))
+        torch.save(self.model.state_dict(), os.path.join(root_dir, "state_dict.pt"))
         return
+
     def test(self, crop_images, model_load="state_dict.pt"):
         self.model.load_state_dict(torch.load(model_load, map_location=torch.device('cpu')))
 
-        for root, dirs, files in os.walk(data_dir):
-            rel_path = os.path.relpath(root, data_dir)
-            for filename in tqdm(files, desc=f"Processing: {rel_path}"):
-                if filename.endswith('.jpg') or filename.endswith('.jpeg'):
-                    rel_path = os.path.relpath(root, data_dir)
-                    output_crop = os.path.join(root_dir, "test_cropped")
-                    output_dir = os.path.join(output_crop, rel_path)
-                    output_path = os.path.join(output_dir, filename)
-                    if(os.path.exists(output_path)):
-                        continue
-                    os.makedirs(output_dir, exist_ok=True)
+        data_dir = f"{root_dir}/test"
+        if crop_images:
+            ip = ImageProcessing("test", data_dir, self.img_size)
+            ip.buildFolders()
 
-                    # load image
-                    img_path = os.path.join(root, filename)
-                    img = Image.open(img_path).convert('RGB')
+            mtcnn = MTCNN(
+                image_size=self.img_size,
+                select_largest=False,
+                post_process=True,
+                margin=32,
+                min_face_size=20,
+                device=self.device
+            )
 
-                    # getting face
-                    mtcnn(img, save_path=output_path)
+            ip.cropImages(mtcnn)
+            del mtcnn
 
-                    # resizing
-                    if (os.path.exists(output_path)):
-                        img = Image.open(output_path).resize((img_size, img_size))
-                        # print(f"Resized: {output_path}")
-                        img.save(output_path)
-                    else:
-                        img.resize((img_size, img_size))
-                        img.save(output_path)
-                        print(f"Failed to crop: {output_path}")
-
-        image_files = sorted([f for f in os.listdir(test_dir) if f.endswith('.jpg') or f.endswith('.jpeg')], key=lambda x: int(os.path.splitext(x)[0]))
+        image_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.jpg') or f.endswith('.jpeg')], key=lambda x: int(os.path.splitext(x)[0]))
         trans = transforms.Compose([
             v2.ToImage(),
             fixed_image_standardization,
@@ -206,11 +204,11 @@ class Model():
 
             for file in tqdm(image_files):
                 if file.endswith('.jpg') or file.endswith('.jpeg'):
-                    img_path = os.path.join(test_dir, file)
+                    img_path = os.path.join(data_dir, file)
                     img = Image.open(img_path)
                     tensor = trans(img).unsqueeze(0)
                     with torch.no_grad():
-                        output = resnet(tensor)
+                        output = self.model(tensor)
 
                     dataset = datasets.ImageFolder(data_dir, transform=trans)
                     classes = dataset.class_to_idx
@@ -221,32 +219,17 @@ class Model():
                     c = [key for idx, key in enumerate(temp) if idx == predicted][0]
                     csvwriter.writerow([name, c[0]])
                     name+=1
-
         return
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-print('Running on device: {}'.format(device))
-
 root_dir = "/home/nick/School/ECE50024/CNN-Facial-Classifier"
-data_dir = f"{root_dir}/train"
-data_small_dir = f"{root_dir}/train_small"
-
-batch_size = 32
-
-img_size = 160
 
 def main(mode, crop_images=False):
-    dataset_dir = data_dir + '_processed'
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    print('Running on device: {}'.format(device))
 
-    resnet = InceptionResnetV1(
-            classify=True,
-            pretrained='vggface2',
-            num_classes=100,
-            dropout_prob=0.75,
-    ).to(device)
+    batch_size = 32
+    img_size = 160
 
-    optimizer = optim.Adam(resnet.parameters(), lr=0.0008)
-    scheduler = MultiStepLR(optimizer)
 
     trans = transforms.Compose([
         v2.ToImage(),
@@ -257,11 +240,28 @@ def main(mode, crop_images=False):
         v2.Normalize(mean=[0.5,0.5,0.5], std=[0.5,0.5,0.5])
     ])
 
-    model = Model(resnet, optimizer, scheduler, trans, device)
+    dropout = 0.75
+    lr = 0.0001
+
+    print(f"Running on dropout rate: {dropout}")
+    print(f"Running on learning rate: {lr}")
+    resnet = InceptionResnetV1(
+            classify=True,
+            pretrained='vggface2',
+            num_classes=100,
+            dropout_prob=dropout,
+    ).to(device)
+
+    optimizer = optim.Adam(resnet.parameters(), lr=lr)
+    scheduler = MultiStepLR(optimizer, [5, 10])
+
+    model = Model(resnet, batch_size, img_size, optimizer, scheduler, trans, device)
+
     if mode == 'train':
         model.train(crop_images)
     elif mode == 'test':
         model.test(crop_images, "state_dict.pt")
+    del model
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Optional app description')
@@ -277,4 +277,3 @@ if __name__ == "__main__":
     else:
         print(f"Running in {args.mode} mode")
         main(args.mode, args.crop_images)
-
